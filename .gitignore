@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*$py.class
+audio_cache/
+.env
+.DS_Store
+venv/
+.venv/

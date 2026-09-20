@@ -1,6 +1,7 @@
 fastapi
 uvicorn
-google-genai>=2.3.0
-openai>=1.0.0
-rick-voice[fish]
 requests
+edge-tts
+infer-rvc-python
+soundfile
+setuptools<70

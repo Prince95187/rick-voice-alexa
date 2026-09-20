@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 audio_cache/
+test_*.mp3
+test_*.wav
 .env
 .DS_Store
 venv/

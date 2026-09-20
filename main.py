@@ -4,9 +4,9 @@ import uuid
 import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse
-from rick_voice import RickVoice
+import rvc_engine
 
-app = FastAPI(title="Rick Alexa Skill Backend")
+app = FastAPI(title="Rick Sanchez Alexa Skill (Local RVC + Gemini)")
 
 CACHE_DIR = "audio_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -31,11 +31,14 @@ def get_base_url():
         return f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}"
     return os.getenv("PUBLIC_URL", "http://localhost:8000").rstrip("/")
 
+@app.on_event("startup")
+async def startup_event():
+    # Pre-warm the RVC models so the first user query has no cold-start delay
+    rvc_engine.init_models()
+
 def generate_rick_text(user_query: str) -> str:
     gemini_key = os.getenv("GEMINI_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
 
-    # 1. Prefer Gemini (Free forever)
     if gemini_key:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
@@ -53,69 +56,36 @@ def generate_rick_text(user_query: str) -> str:
             if resp.status_code == 200:
                 data = resp.json()
                 text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                # Clean enclosing quotes if model added them
                 if text.startswith('"') and text.endswith('"'):
                     text = text[1:-1]
                 return text
         except Exception:
             pass
 
-    # 2. Fallback to OpenAI if configured
-    if openai_key:
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key=openai_key)
-            completion = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": RICK_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_query},
-                ],
-                max_tokens=120,
-            )
-            return completion.choices[0].message.content or "Wubba lubba dub dub!"
-        except Exception:
-            pass
-
-    # 3. Static fallback quotes
     return random.choice(FALLBACK_QUOTES)
 
 @app.get("/")
 async def health():
-    active_llm = "gemini-2.5-flash (Google Free Tier)" if os.getenv("GEMINI_API_KEY") else ("openai" if os.getenv("OPENAI_API_KEY") else "static-quotes")
     return {
         "status": "online",
-        "service": "rick-voice-alexa",
-        "active_llm": active_llm,
-        "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
-        "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
-        "fish_audio_configured": bool(os.getenv("FISH_API_KEY")),
+        "service": "rick-voice-alexa-rvc",
+        "voice_engine": "Self-Hosted RVC (100% Free Forever)",
+        "model_loaded": rvc_engine._INITIALIZED,
+        "llm_engine": "Google Gemini 2.5 Flash",
         "base_url": get_base_url(),
     }
 
-@app.get("/test-llm")
-async def test_llm(query: str = "Who are you and what do you do?"):
-    """Test the Rick personality text generation directly."""
-    reply = generate_rick_text(query)
-    return {
-        "user_query": query,
-        "rick_reply": reply,
-        "llm_provider": "gemini" if os.getenv("GEMINI_API_KEY") else ("openai" if os.getenv("OPENAI_API_KEY") else "static")
-    }
-
 @app.get("/test-voice")
-async def test_voice(text: str = "I turned myself into a pickle, Morty!"):
-    """Test Rick voice synthesis directly in your browser!"""
+async def test_voice(text: str = "I turned myself into a pickle, Morty! I'm Pickle Rick!"):
+    """Test Rick voice synthesis directly in your browser with RVC!"""
     try:
-        rick = RickVoice()
-        audio_bytes = rick.synthesize(text)
         file_id = str(uuid.uuid4())
         filepath = os.path.join(CACHE_DIR, f"{file_id}.mp3")
-        with open(filepath, "wb") as f:
-            f.write(audio_bytes)
-        return FileResponse(filepath, media_type="audio/mpeg", filename="rick.mp3")
+        actual_path = await rvc_engine.synthesize_rick(text, filepath)
+        media_type = "audio/mpeg" if actual_path.endswith(".mp3") else "audio/wav"
+        return FileResponse(actual_path, media_type=media_type, filename=os.path.basename(actual_path))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Voice synthesis error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"RVC voice synthesis error: {str(e)}")
 
 @app.post("/alexa")
 async def alexa_webhook(request: Request):
@@ -144,20 +114,19 @@ async def alexa_webhook(request: Request):
     else:
         user_text = "Say something cynical."
 
-    # 1. Generate text using Google Gemini
+    # 1. Generate personality reply with Google Gemini
     rick_text = generate_rick_text(user_text)
 
-    # 2. Synthesize with rick-voice
+    # 2. Synthesize Rick voice using RVC
     try:
-        rick = RickVoice()
-        audio_bytes = rick.synthesize(rick_text)
         file_id = str(uuid.uuid4())
-        filepath = os.path.join(CACHE_DIR, f"{file_id}.mp3")
-        with open(filepath, "wb") as f:
-            f.write(audio_bytes)
+        target_path = os.path.join(CACHE_DIR, f"{file_id}.mp3")
+        actual_file = await rvc_engine.synthesize_rick(rick_text, target_path)
 
         base_url = get_base_url()
-        audio_url = f"{base_url}/audio/{file_id}.mp3"
+        ext = os.path.splitext(actual_file)[1].lstrip(".")
+        audio_url = f"{base_url}/audio/{file_id}.{ext}"
+
         return {
             "version": "1.0",
             "response": {
@@ -169,15 +138,16 @@ async def alexa_webhook(request: Request):
             },
         }
     except Exception as e:
-        # If TTS fails, speak the text directly with Alexa's voice
-        return build_alexa_speech_response(f"{rick_text} (Note: Voice synth unavailable: {str(e)})")
+        # Fallback to Alexa speaking the text if local TTS engine fails
+        return build_alexa_speech_response(f"{rick_text} (Voice error: {str(e)})")
 
-@app.get("/audio/{file_id}.mp3")
-async def serve_audio(file_id: str):
-    filepath = os.path.join(CACHE_DIR, f"{file_id}.mp3")
+@app.get("/audio/{filename}")
+async def serve_audio(filename: str):
+    filepath = os.path.join(CACHE_DIR, filename)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Audio file not found")
-    return FileResponse(filepath, media_type="audio/mpeg")
+    media = "audio/mpeg" if filename.endswith(".mp3") else "audio/wav"
+    return FileResponse(filepath, media_type=media)
 
 def build_alexa_speech_response(text: str, end_session: bool = True):
     return {

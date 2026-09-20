@@ -1,4 +1,5 @@
 import os
+import random
 import uuid
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse
@@ -7,23 +8,63 @@ from rick_voice import RickVoice
 
 app = FastAPI(title="Rick Alexa Skill Backend")
 
-# Initialize clients
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-# RickVoice uses FISH_API_KEY from environment by default
-rick = RickVoice()
-
-# Audio cache folder to serve files back to Alexa
+# Audio cache directory
 CACHE_DIR = "audio_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Base public domain from Railway (e.g. https://xyz.up.railway.app)
-BASE_URL = os.getenv("PUBLIC_URL", "http://localhost:8000").rstrip("/")
+# Auto-detect public URL from Railway variables or fallback
+def get_base_url():
+    if os.getenv("RAILWAY_PUBLIC_DOMAIN"):
+        return f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}"
+    return os.getenv("PUBLIC_URL", "http://localhost:8000").rstrip("/")
 
+def get_openai_client():
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        return OpenAI(api_key=api_key)
+    except Exception:
+        return None
+
+def get_rick_voice():
+    # Will use FISH_API_KEY from environment
+    return RickVoice()
+
+FALLBACK_QUOTES = [
+    "I turned myself into a pickle, Morty! I'm Pickle Rick!",
+    "Nobody exists on purpose. Nobody belongs anywhere. Everybody's gonna die. Come watch TV.",
+    "Wubba lubba dub dub! What do you want from me?",
+    "Listen to me, Morty. The universe is a cruel, uncaring void. Now what was your question?",
+    "To live is to risk it all. Otherwise you're just an inert chunk of randomly assembled molecules.",
+]
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "rick-voice-alexa"}
+    has_openai = bool(os.getenv("OPENAI_API_KEY"))
+    has_fish = bool(os.getenv("FISH_API_KEY"))
+    return {
+        "status": "online",
+        "service": "rick-voice-alexa",
+        "openai_configured": has_openai,
+        "fish_audio_configured": has_fish,
+        "base_url": get_base_url(),
+        "hint": "Set OPENAI_API_KEY in Railway to enable dynamic GPT-4o replies. Otherwise fallback Rick quotes are used."
+    }
 
+@app.get("/test-voice")
+async def test_voice(text: str = "I turned myself into a pickle, Morty!"):
+    """Test Rick voice synthesis directly in your browser!"""
+    try:
+        rick = get_rick_voice()
+        audio_bytes = rick.synthesize(text)
+        file_id = str(uuid.uuid4())
+        filepath = os.path.join(CACHE_DIR, f"{file_id}.mp3")
+        with open(filepath, "wb") as f:
+            f.write(audio_bytes)
+        return FileResponse(filepath, media_type="audio/mpeg", filename="rick.mp3")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Voice synthesis error: {str(e)}")
 
 @app.post("/alexa")
 async def alexa_webhook(request: Request):
@@ -35,18 +76,15 @@ async def alexa_webhook(request: Request):
     req = data.get("request", {})
     req_type = req.get("type", "")
 
-    # Handle LaunchRequest or IntentRequest
     if req_type == "LaunchRequest":
         user_text = "Say hello to me."
     elif req_type == "IntentRequest":
         intent = req.get("intent", {})
         intent_name = intent.get("name", "")
 
-        # Handle built-in stop / cancel
         if intent_name in ("AMAZON.StopIntent", "AMAZON.CancelIntent"):
             return build_alexa_speech_response("Fine, whatever. I was busy in the garage anyway.")
 
-        # Extract slot value (e.g. "Query" or fallback to generic question)
         slots = intent.get("slots", {})
         query_slot = slots.get("Query") or slots.get("query") or {}
         user_text = query_slot.get("value") or "Say something sarcastic to me."
@@ -55,37 +93,43 @@ async def alexa_webhook(request: Request):
     else:
         user_text = "Say something cynical."
 
-    # 1. Ask OpenAI with Rick personality
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are Rick Sanchez from Rick and Morty. "
-                        "Be cynical, grumpy, stutter occasionally (e.g. 'I-I-I', 'M-Morty'), "
-                        "belittle the user slightly, but answer their question. "
-                        "Keep it short and punchy (1 to 2 sentences max)."
-                    ),
-                },
-                {"role": "user", "content": user_text},
-            ],
-            max_tokens=120,
-        )
-        rick_text = completion.choices[0].message.content or "Wubba lubba dub dub!"
-    except Exception as e:
-        rick_text = f"My portal gun is broken, and OpenAI failed: {str(e)}"
+    # 1. Generate text with OpenAI if configured, otherwise pick a classic Rick quote
+    client = get_openai_client()
+    if client:
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Rick Sanchez from Rick and Morty. "
+                            "Be cynical, grumpy, stutter occasionally (e.g. 'I-I-I', 'M-Morty'), "
+                            "belittle the user slightly, but answer their question. "
+                            "Keep it short and punchy (1 to 2 sentences max)."
+                        ),
+                    },
+                    {"role": "user", "content": user_text},
+                ],
+                max_tokens=120,
+            )
+            rick_text = completion.choices[0].message.content or "Wubba lubba dub dub!"
+        except Exception:
+            rick_text = random.choice(FALLBACK_QUOTES)
+    else:
+        rick_text = random.choice(FALLBACK_QUOTES)
 
-    # 2. Synthesize Rick's voice using rick-voice (Fish Audio)
+    # 2. Synthesize with rick-voice
     try:
+        rick = get_rick_voice()
         audio_bytes = rick.synthesize(rick_text)
         file_id = str(uuid.uuid4())
         filepath = os.path.join(CACHE_DIR, f"{file_id}.mp3")
         with open(filepath, "wb") as f:
             f.write(audio_bytes)
 
-        audio_url = f"{BASE_URL}/audio/{file_id}.mp3"
+        base_url = get_base_url()
+        audio_url = f"{base_url}/audio/{file_id}.mp3"
         return {
             "version": "1.0",
             "response": {
@@ -97,9 +141,7 @@ async def alexa_webhook(request: Request):
             },
         }
     except Exception as e:
-        # Fallback to plain SSML speech if TTS voice fails
-        return build_alexa_speech_response(f"Voice synth broke, Morty. Here is what I was gonna say: {rick_text}")
-
+        return build_alexa_speech_response(f"Voice synth failed, Morty. Error: {str(e)}")
 
 @app.get("/audio/{file_id}.mp3")
 async def serve_audio(file_id: str):
@@ -107,7 +149,6 @@ async def serve_audio(file_id: str):
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Audio file not found")
     return FileResponse(filepath, media_type="audio/mpeg")
-
 
 def build_alexa_speech_response(text: str, end_session: bool = True):
     return {

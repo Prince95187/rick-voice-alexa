@@ -33,7 +33,7 @@ def get_base_url():
 
 @app.on_event("startup")
 async def startup_event():
-    # Pre-warm the RVC models so the first user query has no cold-start delay
+    # Pre-warm RVC models into memory
     rvc_engine.init_models()
 
 def generate_rick_text(user_query: str) -> str:
@@ -138,7 +138,6 @@ async def alexa_webhook(request: Request):
             },
         }
     except Exception as e:
-        # Fallback to Alexa speaking the text if local TTS engine fails
         return build_alexa_speech_response(f"{rick_text} (Voice error: {str(e)})")
 
 @app.get("/audio/{filename}")
@@ -160,3 +159,13 @@ def build_alexa_speech_response(text: str, end_session: bool = True):
             "shouldEndSession": end_session,
         },
     }
+
+if __name__ == "__main__":
+    import uvicorn
+    raw_port = os.getenv("PORT", "8000")
+    try:
+        port = int(raw_port)
+    except ValueError:
+        port = 8000
+    print(f"Starting server on port {port}...")
+    uvicorn.run(app, host="0.0.0.0", port=port)

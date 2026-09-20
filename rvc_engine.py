@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import uuid
 import numpy as np
 import soundfile as sf
@@ -93,14 +94,30 @@ def convert_audio_to_rick(input_audio_path: str, output_mp3_path: str):
         max_int16 /= audio_max
     audio_opt = (out * max_int16).astype(np.int16)
 
-    # Save directly as MP3
+    # Save as standard Alexa-compliant MP3 (24000Hz, 48kbps, mono)
+    temp_wav = f"/tmp/raw_{uuid.uuid4()}.wav"
     try:
-        sf.write(output_mp3_path, audio_opt, _TGT_SR, format="MP3")
-    except Exception:
-        # Fallback to WAV if MP3 encoder is missing in libsndfile
-        wav_path = os.path.splitext(output_mp3_path)[0] + ".wav"
-        sf.write(wav_path, audio_opt, _TGT_SR)
-        return wav_path
+        sf.write(temp_wav, audio_opt, _TGT_SR)
+        # Convert with ffmpeg to ensure valid MP3 for Alexa SSML
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", temp_wav,
+            "-ac", "1",
+            "-ar", "24000",
+            "-b:a", "48k",
+            "-codec:a", "libmp3lame",
+            output_mp3_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode != 0:
+            # Fallback if libmp3lame fails
+            subprocess.run(["ffmpeg", "-y", "-i", temp_wav, output_mp3_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    finally:
+        if os.path.exists(temp_wav):
+            try:
+                os.remove(temp_wav)
+            except Exception:
+                pass
 
     return output_mp3_path
 

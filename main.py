@@ -26,7 +26,12 @@ FALLBACK_QUOTES = [
     "To live is to risk it all. Otherwise you're just an inert chunk of randomly assembled molecules.",
 ]
 
-def get_base_url():
+def get_base_url(request: Request = None):
+    if request:
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+        proto = request.headers.get("x-forwarded-proto", "https")
+        if host:
+            return f"{proto}://{host}"
     if os.getenv("RAILWAY_PUBLIC_DOMAIN"):
         return f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}"
     return os.getenv("PUBLIC_URL", "http://localhost:8000").rstrip("/")
@@ -65,14 +70,14 @@ def generate_rick_text(user_query: str) -> str:
     return random.choice(FALLBACK_QUOTES)
 
 @app.get("/")
-async def health():
+async def health(request: Request):
     return {
         "status": "online",
         "service": "rick-voice-alexa-rvc",
         "voice_engine": "Self-Hosted RVC (100% Free Forever)",
         "model_loaded": rvc_engine._INITIALIZED,
         "llm_engine": "Google Gemini 2.5 Flash",
-        "base_url": get_base_url(),
+        "base_url": get_base_url(request),
     }
 
 @app.get("/test-voice")
@@ -123,7 +128,7 @@ async def alexa_webhook(request: Request):
         target_path = os.path.join(CACHE_DIR, f"{file_id}.mp3")
         actual_file = await rvc_engine.synthesize_rick(rick_text, target_path)
 
-        base_url = get_base_url()
+        base_url = get_base_url(request)
         ext = os.path.splitext(actual_file)[1].lstrip(".")
         audio_url = f"{base_url}/audio/{file_id}.{ext}"
 
